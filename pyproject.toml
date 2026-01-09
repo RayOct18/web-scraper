@@ -1,0 +1,13 @@
+[project]
+name = "python-scraper"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "beautifulsoup4>=4.12.0",
+    "prometheus-client>=0.19.0",
+    "pybloom-live>=4.0.0",
+]
+
+[tool.uv]
+dev-dependencies = []
