@@ -10,7 +10,9 @@
 2. [設計演進](#設計演進)
 3. [效能分析](#效能分析)
 4. [優化實驗](#優化實驗)
-5. [讀書會 Demo 規劃](#讀書會-demo-規劃)
+5. [深入理解：Worker、Bloom Filter、DNS Cache 的關係](#深入理解worker-bloom-filter-dns-cache-的關係)
+6. [待驗證實驗：優化效果量化](#待驗證實驗優化效果量化)
+7. [讀書會 Demo 規劃](#讀書會-demo-規劃)
 
 ---
 
@@ -257,12 +259,193 @@ uv run python benchmark/dns_test.py
 
 ---
 
+## 深入理解：Worker、Bloom Filter、DNS Cache 的關係
+
+### 問題
+
+> 如果頻寬夠大，只要把 worker 開超大，就可以達到 400 QPS？
+
+### Worker 開太多的影響
+
+理論上 Worker 越多 → 並發越高 → QPS 越高。
+
+**但實際上有上限**：
+
+| 問題 | 症狀 | 原因 |
+|------|------|------|
+| **頻寬飽和** | p50 延遲飆高、timeout 增加 | 1000 個 request 同時搶 100Mbps |
+| **CPU 過載** | 整體變慢 | context switch、HTML parsing 排隊 |
+| **記憶體爆炸** | OOM | 每個 request 都在等 response，buffer 堆積 |
+| **連線數限制** | connection refused | 超過 ulimit 或 TCP 狀態表 |
+| **目標網站限流** | 429 Too Many Requests | 被 ban |
+
+**實測驗證**：
+```
+30 workers  → 17.5 QPS, p50 正常 ✅
+200 workers → p50 = 10 秒 ❌ (timeout)
+```
+
+200 workers 時，每個 request 都在排隊等頻寬，延遲飆高。
+
+### Bloom Filter / DNS Cache 如何幫助吞吐量？
+
+**關鍵理解**：它們不是增加並發，而是 **減少浪費**。
+
+#### 爬蟲的時間花在哪？
+
+```
+總時間 = DNS 查詢 + TCP 連線 + 下載 + 解析 + 去重檢查
+```
+
+| 階段 | 沒優化 | 有優化 | 節省 |
+|------|--------|--------|------|
+| DNS 查詢 | 20ms/次 | 0ms (cache hit) | **20ms** |
+| 去重檢查 | 0.001ms | 0.001ms | 0 |
+| 記憶體 | 100MB (1M URLs) | 1MB (Bloom) | **99MB** |
+
+#### DNS Cache 的真正價值
+
+```
+沒有 DNS Cache：
+  Worker 1: DNS(go.dev) → 20ms → 下載 → ...
+  Worker 2: DNS(go.dev) → 20ms → 下載 → ...  ← 重複！
+  Worker 3: DNS(go.dev) → 20ms → 下載 → ...  ← 重複！
+
+有 DNS Cache：
+  Worker 1: DNS(go.dev) → 20ms → cache 存起來
+  Worker 2: cache hit → 0ms → 下載 → ...
+  Worker 3: cache hit → 0ms → 下載 → ...
+```
+
+**效果**：每個 domain 只查一次 DNS，後續都是 0ms。
+
+#### Bloom Filter 的真正價值
+
+**不是速度，是記憶體**。
+
+| 場景 | Set | Bloom Filter |
+|------|-----|--------------|
+| 1 億 URL | **6.4 GB** | **120 MB** |
+| 10 億 URL | **64 GB** | **1.2 GB** |
+
+當你爬到 1 億頁時：
+- Set：需要 64GB RAM，可能要換更大的機器
+- Bloom：1.2GB，普通機器就夠
+
+**間接幫助吞吐量**：不用換機器、不用分散式、不會 OOM crash。
+
+### 三者的關係
+
+| 優化 | 作用 | 何時有效 |
+|------|------|---------|
+| 增加 Worker | 提高並發 | 頻寬未飽和時 |
+| DNS Cache | 減少每個 request 的延遲 | 多 domain 爬取 |
+| Bloom Filter | 讓你能爬更多頁而不 OOM | 大規模爬取（>100 萬 URL）|
+
+**它們是互補的，不是互斥的。**
+
+### 正確的擴展順序
+
+```
+1. 先確認頻寬夠（計算理論上限）
+2. 增加 worker 直到 CPU 或記憶體滿
+3. 加 DNS Cache（減少每個 request 的延遲）
+4. 加 Bloom Filter（讓記憶體撐得住更多 URL）
+5. 如果還不夠 → 多台機器 / 分散式
+```
+
+---
+
+## 待驗證實驗：優化效果量化
+
+### 實驗目的
+
+在頻寬固定的情況下，量化 DNS Cache 和 Bloom Filter 對吞吐量和資源使用的影響。
+
+### 控制變數
+
+| 固定 | 變動 |
+|------|------|
+| 頻寬（~90 Mbps） | DNS Cache 開/關 |
+| Workers（30） | Bloom Filter 開/關 |
+| MaxPerHost（3） | |
+| MaxPages（5000） | |
+
+### 測量指標
+
+| 指標 | 意義 |
+|------|------|
+| 總時間 | 爬完 N 頁花多久 |
+| QPS | 吞吐量 |
+| 記憶體峰值 | Bloom Filter 效果 |
+| DNS 查詢次數 | DNS Cache 效果 |
+
+### 實驗矩陣
+
+| # | DNS Cache | Bloom Filter | 預期效果 |
+|---|-----------|--------------|---------|
+| 1 | ❌ | ❌ | Baseline |
+| 2 | ✅ | ❌ | 延遲降低 → QPS 略升 |
+| 3 | ❌ | ✅ | 記憶體降低（QPS 不變）|
+| 4 | ✅ | ✅ | 兩者都有 |
+
+### 預期結果
+
+#### DNS Cache
+
+```
+Baseline:  每個 request 多 ~20ms DNS
+有 Cache:  只有第一次查，後續 0ms
+
+假設爬 5000 頁、500 個 domain：
+- 無 Cache: 5000 × 20ms = 100 秒花在 DNS
+- 有 Cache: 500 × 20ms = 10 秒花在 DNS
+- 節省: 90 秒
+```
+
+**注意**：如果頻寬是瓶頸，這 90 秒可能被「等頻寬」蓋過去，改善不明顯。
+
+#### Bloom Filter
+
+```
+QPS 不會變，但記憶體會大幅降低。
+
+5000 URLs:
+- Set: ~6 MB
+- Bloom: ~60 KB
+
+效果在長時間爬取時才明顯（爬幾百頁看不出來）。
+```
+
+### 執行方式
+
+```bash
+# Baseline
+uv run python main.py  # 記錄時間、記憶體
+
+# + DNS Cache
+uv run python main.py --dns-cache  # 記錄時間、記憶體
+
+# + Bloom Filter
+uv run python main.py --bloom  # 記錄時間、記憶體
+
+# Both
+uv run python main.py --dns-cache --bloom
+```
+
+### 狀態
+
+⏳ **待實作**：需要將 DNS Cache 和 Bloom Filter 加到 main.py 做成可開關的功能。
+
+---
+
 ## 結論
 
 1. **架構設計**比暴力增加 worker 更重要
 2. **頻寬是硬限制**，程式優化無法突破
 3. **Bloom Filter** 省記憶體，**DNS Cache** 省延遲
 4. 測試前先算理論上限，避免走冤枉路
+5. **三種優化互補**：Worker 提高並發、DNS Cache 減少延遲、Bloom Filter 減少記憶體
 
 ---
 
