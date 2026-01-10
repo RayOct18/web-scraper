@@ -55,8 +55,19 @@ class Config:
         "https://infoq.com/",
         "https://martinfowler.com/",
     ])
-    num_workers: int = 1000
+    num_workers: int = 20
     max_per_host: int = 10
     max_pages: int = 100000
     request_timeout: float = 10.0
     metrics_port: int = 9090
+
+    # 模擬模式設定
+    simulation_mode: bool = False
+    simulation_delay_ms: int = 50
+    simulation_links_min: int = 5
+    simulation_links_max: int = 20
+    url_pool_file: str = "url_pool.json"
+
+    # 優化選項
+    use_bloom_filter: bool = False
+    use_dns_cache: bool = False
