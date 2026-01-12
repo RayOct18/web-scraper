@@ -36,16 +36,20 @@
 ## 檔案結構
 
 ```
-python-scraper/
-├── main.py              # 主程式：Worker pool + graceful shutdown
-├── frontier.py          # URL 邊境：Per-host queue + semaphore
-├── parser.py            # HTML 解析：提取連結
-├── config.py            # 設定檔
-├── metrics.py           # Prometheus metrics
-├── naive.py             # 展示問題的 naive 爬蟲
-├── benchmark/
-│   ├── bloom_test.py    # Bloom Filter vs Set 效能測試
-│   └── dns_test.py      # DNS Cache 效果測試
+web-scraper/
+├── src/
+│   ├── __init__.py       # Package 初始化
+│   ├── main.py           # 主程式入口
+│   ├── dispatcher.py     # Worker 協調：管理 worker pool 和工作分配
+│   ├── frontier.py       # URL 邊境：Per-host queue + semaphore
+│   ├── parser.py         # HTML 解析：提取連結
+│   ├── config.py         # 設定檔
+│   ├── metrics.py        # Prometheus metrics
+│   ├── simulation.py     # 模擬模組：URLPool, DNSResolver
+│   └── url_collector.py  # URL 收集器：建立模擬用 URL 池
+├── grafana/              # Grafana 監控設定
+├── prometheus.yml        # Prometheus 設定
+├── docker-compose.yml    # 監控服務容器設定
 └── pyproject.toml
 ```
 
@@ -60,17 +64,40 @@ uv sync
 ### 執行爬蟲
 
 ```bash
-uv run python main.py
+# 真實模式（發送實際 HTTP 請求）
+uv run python src/main.py
+
+# 模擬模式（不發送真實請求，用於效能測試）
+uv run python src/main.py --simulation --delay-ms 50
+
+# 帶 DNS Cache 的模擬模式
+uv run python src/main.py --simulation --dns-cache
+
+# 自訂參數
+uv run python src/main.py --workers 50 --max-per-host 5 --max-pages 10000
 ```
 
-### 執行 Benchmark
+### CLI 參數
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--max-pages` | 最大爬取頁數 | 30000 |
+| `--workers` | Worker 數量 | 20 |
+| `--max-per-host` | 每個 domain 最大並發 | 10 |
+| `--simulation` | 啟用模擬模式 | false |
+| `--delay-ms` | 模擬延遲（毫秒） | 50 |
+| `--url-pool` | URL 池檔案路徑 | url_pool.json |
+| `--bloom` | 使用 Bloom Filter 去重 | false |
+| `--dns-cache` | 啟用 DNS Cache | false |
+
+### 建立 URL 池（模擬模式用）
 
 ```bash
-# Bloom Filter vs Set
-uv run python benchmark/bloom_test.py
+# 先收集真實 URL 建立 URL 池
+uv run python src/url_collector.py --max-pages 50000
 
-# DNS Cache 效果
-uv run python benchmark/dns_test.py
+# 之後可用模擬模式測試
+uv run python src/main.py --simulation
 ```
 
 ## 設計重點
@@ -78,7 +105,7 @@ uv run python benchmark/dns_test.py
 ### 1. 禮貌性 (Politeness)
 
 - **Per-host queue**：每個 domain 獨立的 URL 佇列
-- **Semaphore**：限制同一 domain 的並發數（預設 3）
+- **Semaphore**：限制同一 domain 的並發數（預設 10）
 - 避免對同一網站發送過多請求
 
 ### 2. 去重 (Deduplication)
@@ -93,9 +120,29 @@ uv run python benchmark/dns_test.py
 | Bloom Filter | 記憶體減少 **88-100x** |
 | DNS Cache | 查詢加速 **10-12x** |
 
-### 4. 監控
+### 4. 模擬模式
 
-- Prometheus metrics 在 `:8000/metrics`
+支援不發送真實 HTTP 請求的模擬模式，用於：
+- **效能測試**：測量爬蟲架構本身的極限 QPS
+- **DNS Cache 效果驗證**：真實 DNS 查詢 + 模擬下載
+- **架構開發**：快速迭代而不影響目標網站
+
+模擬模式流程：
+1. 先用 `url_collector.py` 收集真實 URL 建立 URL 池
+2. 模擬時從 URL 池隨機選取連結（維持 domain 多樣性）
+3. 執行真實 DNS 查詢，但跳過實際下載
+
+### 5. 監控
+
+使用 Docker Compose 啟動 Prometheus + Grafana：
+
+```bash
+docker compose up -d
+```
+
+- **Grafana**: http://localhost:3000 (admin/admin)
+- **Prometheus**: http://localhost:9091
+- **Metrics endpoint**: `:9090/metrics`
 - 指標：pages_crawled, active_requests, request_duration, queue_size
 
 ## Benchmark 結果
@@ -117,15 +164,28 @@ uv run python benchmark/dns_test.py
 
 ## 設定
 
-編輯 `config.py`：
+編輯 `src/config.py`：
 
 ```python
 @dataclass
 class Config:
-    num_workers: int = 30           # Worker 數量
-    max_per_host: int = 3           # 每個 domain 最大並發
-    max_pages: int = 500            # 最大爬取頁數
-    request_timeout: float = 10.0   # 請求超時（秒）
+    seed_urls: list[str]              # 種子 URL 列表（預設 50+ 個網站）
+    num_workers: int = 20             # Worker 數量
+    max_per_host: int = 10            # 每個 domain 最大並發
+    max_pages: int = 30000            # 最大爬取頁數
+    request_timeout: float = 10.0     # 請求超時（秒）
+    metrics_port: int = 9090          # Prometheus metrics port
+
+    # 模擬模式設定
+    simulation_mode: bool = False     # 是否啟用模擬模式
+    simulation_delay_ms: int = 50     # 模擬延遲（毫秒）
+    simulation_links_min: int = 5     # 每頁最少連結數
+    simulation_links_max: int = 20    # 每頁最多連結數
+    url_pool_file: str = "url_pool.json"
+
+    # 優化選項
+    use_bloom_filter: bool = False    # 使用 Bloom Filter 去重
+    use_dns_cache: bool = False       # 啟用 DNS Cache
 ```
 
 ## QPS 與頻寬關係
@@ -141,7 +201,6 @@ class Config:
 ## 相關專案
 
 - Go 版本：`/home/rayxie/go-scraper/`
-- 監控：Prometheus + Grafana（見 go-scraper/docker-compose.yml）
 
 ## License
 

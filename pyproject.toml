@@ -10,4 +10,6 @@ dependencies = [
 ]
 
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+    "black>=25.12.0",
+]

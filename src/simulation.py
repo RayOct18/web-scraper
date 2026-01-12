@@ -11,6 +11,7 @@ import asyncio
 import json
 import random
 import socket
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -23,6 +24,15 @@ class DNSResolver:
         self._cache: dict[str, list[str]] = {}
         self.hits = 0
         self.misses = 0
+        self._metrics = None
+
+    def _get_metrics(self):
+        """延遲載入 metrics（避免循環 import）"""
+        if self._metrics is None:
+            from src.metrics import get_dns_metrics
+
+            self._metrics = get_dns_metrics()
+        return self._metrics
 
     def _blocking_resolve(self, hostname: str) -> list[str]:
         """同步 DNS 查詢（會阻塞）"""
@@ -33,16 +43,23 @@ class DNSResolver:
 
     async def resolve(self, hostname: str) -> list[str]:
         """非同步解析 hostname 為 IP 地址列表"""
+        hits_metric, misses_metric, size_metric = self._get_metrics()
+
         if self.use_cache and hostname in self._cache:
             self.hits += 1
+            hits_metric.inc()
             return self._cache[hostname]
 
         self.misses += 1
+        misses_metric.inc()
+
         # 使用線程池避免阻塞 event loop
         ips = await asyncio.to_thread(self._blocking_resolve, hostname)
 
         if self.use_cache:
             self._cache[hostname] = ips
+            size_metric.set(len(self._cache))
+
         return ips
 
     @property
@@ -138,6 +155,8 @@ async def simulated_fetch(
     回傳格式與真實 fetch 相同：
     (status, body, duration, error)
     """
+    start = time.monotonic()
+
     # 1. DNS 查詢（真實，非阻塞）
     if dns_resolver:
         hostname = urlparse(url).netloc
@@ -147,4 +166,6 @@ async def simulated_fetch(
     delay_sec = delay_ms / 1000
     await asyncio.sleep(delay_sec)
 
-    return 200, "", delay_sec, None
+    # 回傳真實總時間（DNS + 模擬延遲）
+    total_duration = time.monotonic() - start
+    return 200, "", total_duration, None
