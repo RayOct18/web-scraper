@@ -3,30 +3,13 @@ import asyncio
 import random
 import time
 
-import aiohttp
-
 from src.config import Config
 from src.dispatcher import Dispatcher, Result
+from src.fetcher import HttpFetcher
 from src.frontier import Frontier
-from src.metrics import Metrics, start_metrics_server
+from src.metrics import Metrics, set_dns_metrics, start_metrics_server
 from src.parser import extract_links
-from src.simulation import DNSResolver, URLPool, simulated_fetch
-
-
-async def fetch(
-    session: aiohttp.ClientSession,
-    url: str,
-    timeout: float,
-) -> tuple[int, str, float, str | None]:
-    start = time.monotonic()
-    try:
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as resp:
-            body = await resp.text()
-            return resp.status, body, time.monotonic() - start, None
-    except Exception as e:
-        return 0, "", time.monotonic() - start, str(e)
+from src.simulation import DNSResolver, SimulatedFetcher, URLPool
 
 
 async def result_processor(
@@ -149,6 +132,7 @@ async def main():
         dns_cache=config.use_dns_cache,
         workers=config.num_workers,
     )
+    set_dns_metrics(metrics)
 
     start_metrics_server(config.metrics_port)
 
@@ -162,8 +146,10 @@ async def main():
 
     # 建立 fetcher 和 link_extractor (根據模式)
     if config.simulation_mode:
-        async def fetcher(url: str):
-            return await simulated_fetch(url, config.simulation_delay_ms, dns_resolver)
+        sim_fetcher = SimulatedFetcher(
+            delay_ms=config.simulation_delay_ms,
+            dns_resolver=dns_resolver,
+        )
 
         def link_extractor(body: str, url: str) -> list[str]:
             link_count = random.randint(
@@ -174,7 +160,7 @@ async def main():
         # 建立 Dispatcher
         dispatcher = Dispatcher(
             frontier=frontier,
-            fetcher=fetcher,
+            fetcher=sim_fetcher.fetch,
             link_extractor=link_extractor,
             results=results,
             num_workers=config.num_workers,
@@ -192,18 +178,14 @@ async def main():
         dispatcher_task.cancel()
         await asyncio.gather(dispatcher_task, return_exceptions=True)
     else:
-        connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async def fetcher(url: str):
-                return await fetch(session, url, config.request_timeout)
-
+        async with HttpFetcher(timeout=config.request_timeout) as http_fetcher:
             def link_extractor(body: str, url: str) -> list[str]:
                 return extract_links(body, url)
 
             # 建立 Dispatcher
             dispatcher = Dispatcher(
                 frontier=frontier,
-                fetcher=fetcher,
+                fetcher=http_fetcher.fetch,
                 link_extractor=link_extractor,
                 results=results,
                 num_workers=config.num_workers,

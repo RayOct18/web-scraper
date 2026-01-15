@@ -176,3 +176,20 @@ async def simulated_fetch(
     # 回傳真實總時間（DNS + 模擬延遲）
     total_duration = time.monotonic() - start
     return 200, "", total_duration, None
+
+
+class SimulatedFetcher:
+    """模擬 fetcher，執行真實 DNS 查詢但以固定延遲模擬下載。
+
+    Usage:
+        fetcher = SimulatedFetcher(delay_ms=50, dns_resolver=resolver)
+        status, body, duration, error = await fetcher.fetch(url)
+    """
+
+    def __init__(self, delay_ms: int, dns_resolver: DNSResolver | None = None):
+        self._delay_ms = delay_ms
+        self._dns_resolver = dns_resolver
+
+    async def fetch(self, url: str) -> tuple[int, str, float, str | None]:
+        """模擬 fetch - 真實 DNS + 模擬延遲。"""
+        return await simulated_fetch(url, self._delay_ms, self._dns_resolver)

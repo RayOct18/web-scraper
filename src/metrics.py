@@ -97,3 +97,28 @@ class Metrics:
 
 def start_metrics_server(port: int):
     start_http_server(port)
+
+
+# DNS metrics 全域狀態
+_dns_metrics: tuple | None = None
+
+
+def get_dns_metrics() -> tuple:
+    """取得 DNS metrics tuple (hits, misses, size)。
+
+    若尚未設定，回傳 NullMetrics 版本。
+    """
+    global _dns_metrics
+    if _dns_metrics is None:
+        return _NullCounter(), _NullCounter(), _NullGauge()
+    return _dns_metrics
+
+
+def set_dns_metrics(metrics: Metrics) -> None:
+    """設定 DNS metrics（由 main 呼叫）。"""
+    global _dns_metrics
+    _dns_metrics = (
+        metrics.dns_cache_hits,
+        metrics.dns_cache_misses,
+        metrics.dns_cache_size,
+    )

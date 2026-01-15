@@ -11,32 +11,14 @@ URL Collector - 收集真實 URL 建立 URL 池
 import argparse
 import asyncio
 import json
-import time
 from collections import defaultdict
 from urllib.parse import urlparse
 
-import aiohttp
-
 from src.config import Config
 from src.dispatcher import Dispatcher, Result
+from src.fetcher import HttpFetcher
 from src.frontier import Frontier
 from src.parser import extract_links
-
-
-async def fetch(
-    session: aiohttp.ClientSession,
-    url: str,
-    timeout: float,
-) -> tuple[int, str, float, str | None]:
-    start = time.monotonic()
-    try:
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as resp:
-            body = await resp.text()
-            return resp.status, body, time.monotonic() - start, None
-    except Exception as e:
-        return 0, "", time.monotonic() - start, str(e)
 
 
 async def result_processor(
@@ -135,19 +117,14 @@ async def main():
     for url in config.seed_urls:
         await frontier.add(url)
 
-    connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        # 建立 fetcher 和 link_extractor
-        async def fetcher(url: str):
-            return await fetch(session, url, config.request_timeout)
-
+    async with HttpFetcher(timeout=config.request_timeout) as http_fetcher:
         def link_extractor(body: str, url: str) -> list[str]:
             return extract_links(body, url)
 
         # 使用 Dispatcher
         dispatcher = Dispatcher(
             frontier=frontier,
-            fetcher=fetcher,
+            fetcher=http_fetcher.fetch,
             link_extractor=link_extractor,
             results=results,
             num_workers=config.num_workers,
