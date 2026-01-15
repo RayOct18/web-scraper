@@ -145,63 +145,37 @@ async def main():
     start_time = time.monotonic()
 
     # 建立 fetcher 和 link_extractor (根據模式)
+    http_fetcher = None
     if config.simulation_mode:
         sim_fetcher = SimulatedFetcher(
             delay_ms=config.simulation_delay_ms,
             dns_resolver=dns_resolver,
         )
-
-        def link_extractor(body: str, url: str) -> list[str]:
-            link_count = random.randint(
-                config.simulation_links_min, config.simulation_links_max
-            )
-            return url_pool.get_random_links(link_count)
-
-        # 建立 Dispatcher
-        dispatcher = Dispatcher(
-            frontier=frontier,
-            fetcher=sim_fetcher.fetch,
-            link_extractor=link_extractor,
-            results=results,
-            num_workers=config.num_workers,
-            metrics=metrics,
+        fetcher_fn = sim_fetcher.fetch
+        link_extractor = lambda body, url: url_pool.get_random_links(
+            random.randint(config.simulation_links_min, config.simulation_links_max)
         )
+    else:
+        http_fetcher = HttpFetcher(timeout=config.request_timeout)
+        await http_fetcher.__aenter__()
+        fetcher_fn = http_fetcher.fetch
+        link_extractor = lambda body, url: extract_links(body, url)
 
-        # 啟動 dispatcher (會自動啟動所有 workers)
-        dispatcher_task = asyncio.create_task(dispatcher.run())
+    # 共用 Dispatcher 邏輯
+    dispatcher = Dispatcher(
+        frontier=frontier,
+        fetcher=fetcher_fn,
+        link_extractor=link_extractor,
+        results=results,
+        num_workers=config.num_workers,
+        metrics=metrics,
+    )
 
-        # 處理結果
+    async with dispatcher:
         crawled = await result_processor(frontier, results, config, metrics)
 
-        # Cleanup
-        dispatcher.stop()
-        dispatcher_task.cancel()
-        await asyncio.gather(dispatcher_task, return_exceptions=True)
-    else:
-        async with HttpFetcher(timeout=config.request_timeout) as http_fetcher:
-            def link_extractor(body: str, url: str) -> list[str]:
-                return extract_links(body, url)
-
-            # 建立 Dispatcher
-            dispatcher = Dispatcher(
-                frontier=frontier,
-                fetcher=http_fetcher.fetch,
-                link_extractor=link_extractor,
-                results=results,
-                num_workers=config.num_workers,
-                metrics=metrics,
-            )
-
-            # 啟動 dispatcher
-            dispatcher_task = asyncio.create_task(dispatcher.run())
-
-            # 處理結果
-            crawled = await result_processor(frontier, results, config, metrics)
-
-            # Cleanup
-            dispatcher.stop()
-            dispatcher_task.cancel()
-            await asyncio.gather(dispatcher_task, return_exceptions=True)
+    if http_fetcher:
+        await http_fetcher.__aexit__(None, None, None)
 
     elapsed = time.monotonic() - start_time
     queued, _, domains = frontier.stats()

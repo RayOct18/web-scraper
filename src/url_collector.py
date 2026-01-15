@@ -130,13 +130,8 @@ async def main():
             num_workers=config.num_workers,
         )
 
-        dispatcher_task = asyncio.create_task(dispatcher.run())
-        crawled = await result_processor(frontier, results, config, collected_urls)
-
-        # Cleanup
-        dispatcher.stop()
-        dispatcher_task.cancel()
-        await asyncio.gather(dispatcher_task, return_exceptions=True)
+        async with dispatcher:
+            crawled = await result_processor(frontier, results, config, collected_urls)
 
     print(f"\nCrawled: {crawled} pages")
     save_url_pool(collected_urls, args.output)

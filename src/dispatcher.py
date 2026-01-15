@@ -126,3 +126,12 @@ class Dispatcher:
     def stop(self):
         """Stop dispatcher and workers."""
         self._running = False
+
+    async def __aenter__(self):
+        self._task = asyncio.create_task(self.run())
+        return self
+
+    async def __aexit__(self, *_):
+        self.stop()
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)

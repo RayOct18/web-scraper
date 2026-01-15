@@ -15,6 +15,7 @@ class Frontier:
         # Per-host queues and rate limiting
         self.host_queues: dict[str, asyncio.Queue[str]] = {}
         self.host_semaphores: dict[str, asyncio.Semaphore] = {}
+        self.host_active: dict[str, int] = {}  # 追蹤每個 host 的活躍數
 
         # Round-robin state
         self._last_host_index = 0
@@ -35,6 +36,7 @@ class Frontier:
         if host not in self.host_queues:
             self.host_queues[host] = asyncio.Queue()
             self.host_semaphores[host] = asyncio.Semaphore(self.max_per_host)
+            self.host_active[host] = 0
 
         await self.host_queues[host].put(url)
         return True
@@ -44,6 +46,7 @@ class Frontier:
         sem = self.host_semaphores.get(host)
         if sem:
             sem.release()
+            self.host_active[host] = max(0, self.host_active.get(host, 0) - 1)
 
     async def get_work(self) -> tuple[str, str] | None:
         """Get available work using round-robin."""
@@ -64,10 +67,11 @@ class Frontier:
                 continue
 
             # Check rate limit (non-blocking)
-            if sem._value <= 0:
+            if self.host_active.get(host, 0) >= self.max_per_host:
                 continue
 
             await sem.acquire()
+            self.host_active[host] = self.host_active.get(host, 0) + 1
             self._last_host_index = (idx + 1) % n
 
             try:
@@ -75,14 +79,13 @@ class Frontier:
                 return host, url
             except asyncio.QueueEmpty:
                 sem.release()
+                self.host_active[host] -= 1
                 continue
 
         return None
 
     def stats(self) -> tuple[int, int, int]:
         queued = sum(q.qsize() for q in self.host_queues.values())
-        active = sum(
-            self.max_per_host - sem._value for sem in self.host_semaphores.values()
-        )
+        active = sum(self.host_active.values())
         domains = len(self.host_queues)
         return queued, active, domains
