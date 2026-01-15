@@ -10,21 +10,27 @@ Simulation Module - 模擬測試相關功能
 import asyncio
 import json
 import random
-import socket
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+import aiodns
+from cachetools import TTLCache
+
 
 class DNSResolver:
-    """DNS 解析器（支援可選的 cache）"""
+    """DNS 解析器（使用 aiodns + 可選 TTLCache）"""
 
-    def __init__(self, use_cache: bool = False):
+    def __init__(self, use_cache: bool = False, cache_size: int = 1024, ttl: int = 300):
         self.use_cache = use_cache
-        self._cache: dict[str, list[str]] = {}
+        self._resolver = aiodns.DNSResolver()
+        self._cache: TTLCache[str, list[str]] | None = None
         self.hits = 0
         self.misses = 0
         self._metrics = None
+
+        if use_cache:
+            self._cache = TTLCache(maxsize=cache_size, ttl=ttl)
 
     def _get_metrics(self):
         """延遲載入 metrics（避免循環 import）"""
@@ -34,18 +40,19 @@ class DNSResolver:
             self._metrics = get_dns_metrics()
         return self._metrics
 
-    def _blocking_resolve(self, hostname: str) -> list[str]:
-        """同步 DNS 查詢（會阻塞）"""
+    async def _do_resolve(self, hostname: str) -> list[str]:
+        """使用 aiodns 做真正的 DNS 查詢"""
         try:
-            return socket.gethostbyname_ex(hostname)[2]
-        except socket.gaierror:
+            result = await self._resolver.query(hostname, "A")
+            return [r.host for r in result]
+        except aiodns.error.DNSError:
             return []
 
     async def resolve(self, hostname: str) -> list[str]:
         """非同步解析 hostname 為 IP 地址列表"""
         hits_metric, misses_metric, size_metric = self._get_metrics()
 
-        if self.use_cache and hostname in self._cache:
+        if self._cache is not None and hostname in self._cache:
             self.hits += 1
             hits_metric.inc()
             return self._cache[hostname]
@@ -53,10 +60,9 @@ class DNSResolver:
         self.misses += 1
         misses_metric.inc()
 
-        # 使用線程池避免阻塞 event loop
-        ips = await asyncio.to_thread(self._blocking_resolve, hostname)
+        ips = await self._do_resolve(hostname)
 
-        if self.use_cache:
+        if self._cache is not None:
             self._cache[hostname] = ips
             size_metric.set(len(self._cache))
 
@@ -65,12 +71,13 @@ class DNSResolver:
     @property
     def stats(self) -> dict:
         total = self.hits + self.misses
+        cache_size = len(self._cache) if self._cache else 0
         return {
             "hits": self.hits,
             "misses": self.misses,
             "total": total,
             "hit_rate": self.hits / total if total > 0 else 0,
-            "cache_size": len(self._cache),
+            "cache_size": cache_size,
         }
 
 

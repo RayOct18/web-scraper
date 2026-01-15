@@ -3,22 +3,22 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 # Labels: mode (real/simulation), dns_cache (on/off), workers
 LABEL_NAMES = ["mode", "dns_cache", "workers"]
 
-pages_crawled = Counter(
+_pages_crawled = Counter(
     "crawler_pages_crawled_total",
     "Total pages crawled",
     LABEL_NAMES,
 )
-active_requests = Gauge(
+_active_requests = Gauge(
     "crawler_active_requests",
     "Active requests",
     LABEL_NAMES,
 )
-queue_size = Gauge(
+_queue_size = Gauge(
     "crawler_queue_size",
     "Queue size",
     LABEL_NAMES,
 )
-request_duration = Histogram(
+_request_duration = Histogram(
     "crawler_request_duration_seconds",
     "Request duration",
     LABEL_NAMES,
@@ -26,55 +26,73 @@ request_duration = Histogram(
 )
 
 # DNS Cache metrics
-dns_cache_hits = Counter(
+_dns_cache_hits = Counter(
     "crawler_dns_cache_hits_total",
     "DNS cache hits",
     LABEL_NAMES,
 )
-dns_cache_misses = Counter(
+_dns_cache_misses = Counter(
     "crawler_dns_cache_misses_total",
     "DNS cache misses",
     LABEL_NAMES,
 )
-dns_cache_size = Gauge(
+_dns_cache_size = Gauge(
     "crawler_dns_cache_size",
     "Number of cached DNS entries",
     LABEL_NAMES,
 )
 
-# 當前 labels（由 main.py 設定）
-_current_labels: dict[str, str] = {}
+
+class _NullCounter:
+    def inc(self, amount=1):
+        pass
 
 
-def set_labels(mode: str, dns_cache: bool, workers: int):
-    """設定當前運行的 labels"""
-    global _current_labels
-    _current_labels = {
-        "mode": mode,
-        "dns_cache": "on" if dns_cache else "off",
-        "workers": str(workers),
-    }
+class _NullGauge:
+    def inc(self, amount=1):
+        pass
+
+    def dec(self, amount=1):
+        pass
+
+    def set(self, value):
+        pass
 
 
-def get_labeled_metrics():
-    """取得帶有當前 labels 的 metrics"""
-    labels = _current_labels
-    return (
-        pages_crawled.labels(**labels),
-        active_requests.labels(**labels),
-        queue_size.labels(**labels),
-        request_duration.labels(**labels),
-    )
+class _NullHistogram:
+    def observe(self, amount):
+        pass
 
 
-def get_dns_metrics():
-    """取得帶有當前 labels 的 DNS metrics"""
-    labels = _current_labels
-    return (
-        dns_cache_hits.labels(**labels),
-        dns_cache_misses.labels(**labels),
-        dns_cache_size.labels(**labels),
-    )
+class NullMetrics:
+    """No-op metrics (for url_collector or testing)"""
+
+    def __init__(self):
+        self.pages_crawled = _NullCounter()
+        self.active_requests = _NullGauge()
+        self.queue_size = _NullGauge()
+        self.request_duration = _NullHistogram()
+        self.dns_cache_hits = _NullCounter()
+        self.dns_cache_misses = _NullCounter()
+        self.dns_cache_size = _NullGauge()
+
+
+class Metrics:
+    """Prometheus metrics wrapper"""
+
+    def __init__(self, mode: str, dns_cache: bool, workers: int):
+        labels = {
+            "mode": mode,
+            "dns_cache": "on" if dns_cache else "off",
+            "workers": str(workers),
+        }
+        self.pages_crawled = _pages_crawled.labels(**labels)
+        self.active_requests = _active_requests.labels(**labels)
+        self.queue_size = _queue_size.labels(**labels)
+        self.request_duration = _request_duration.labels(**labels)
+        self.dns_cache_hits = _dns_cache_hits.labels(**labels)
+        self.dns_cache_misses = _dns_cache_misses.labels(**labels)
+        self.dns_cache_size = _dns_cache_size.labels(**labels)
 
 
 def start_metrics_server(port: int):

@@ -8,11 +8,7 @@ import aiohttp
 from src.config import Config
 from src.dispatcher import Dispatcher, Result
 from src.frontier import Frontier
-from src.metrics import (
-    get_labeled_metrics,
-    set_labels,
-    start_metrics_server,
-)
+from src.metrics import Metrics, start_metrics_server
 from src.parser import extract_links
 from src.simulation import DNSResolver, URLPool, simulated_fetch
 
@@ -37,10 +33,8 @@ async def result_processor(
     frontier: Frontier,
     results: asyncio.Queue[Result],
     config: Config,
+    metrics: Metrics,
 ) -> int:
-    # 取得帶 labels 的 metrics
-    _, _, queue_size, _ = get_labeled_metrics()
-
     crawled = 0
 
     while crawled < config.max_pages:
@@ -64,7 +58,7 @@ async def result_processor(
             await frontier.add(link)
 
         queued, active, domains = frontier.stats()
-        queue_size.set(queued)
+        metrics.queue_size.set(queued)
 
     return crawled
 
@@ -149,8 +143,8 @@ async def main():
             f"DNS resolver: cache={'enabled' if config.use_dns_cache else 'disabled'}\n"
         )
 
-    # 設定 metrics labels
-    set_labels(
+    # 建立 metrics
+    metrics = Metrics(
         mode="simulation" if config.simulation_mode else "real",
         dns_cache=config.use_dns_cache,
         workers=config.num_workers,
@@ -184,13 +178,14 @@ async def main():
             link_extractor=link_extractor,
             results=results,
             num_workers=config.num_workers,
+            metrics=metrics,
         )
 
         # 啟動 dispatcher (會自動啟動所有 workers)
         dispatcher_task = asyncio.create_task(dispatcher.run())
 
         # 處理結果
-        crawled = await result_processor(frontier, results, config)
+        crawled = await result_processor(frontier, results, config, metrics)
 
         # Cleanup
         dispatcher.stop()
@@ -212,13 +207,14 @@ async def main():
                 link_extractor=link_extractor,
                 results=results,
                 num_workers=config.num_workers,
+                metrics=metrics,
             )
 
             # 啟動 dispatcher
             dispatcher_task = asyncio.create_task(dispatcher.run())
 
             # 處理結果
-            crawled = await result_processor(frontier, results, config)
+            crawled = await result_processor(frontier, results, config, metrics)
 
             # Cleanup
             dispatcher.stop()

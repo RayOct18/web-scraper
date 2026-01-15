@@ -7,12 +7,16 @@ Dispatcher Module - Worker 協調與執行
 3. 執行 worker 邏輯
 """
 
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, TYPE_CHECKING
 
 from src.frontier import Frontier
-from src.metrics import get_labeled_metrics
+
+if TYPE_CHECKING:
+    from src.metrics import Metrics, NullMetrics
 
 
 @dataclass
@@ -35,12 +39,18 @@ class Dispatcher:
         link_extractor: Callable[[str, str], list[str]],
         results: asyncio.Queue[Result],
         num_workers: int,
+        metrics: Metrics | NullMetrics | None = None,
     ):
         self.frontier = frontier
         self.fetcher = fetcher
         self.link_extractor = link_extractor
         self.results = results
         self.num_workers = num_workers
+
+        # Metrics (use NullMetrics if not provided)
+        if metrics is None:
+            metrics = NullMetrics()
+        self.metrics = metrics
 
         # 共享 work queue，背壓控制
         self.work_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(
@@ -77,8 +87,6 @@ class Dispatcher:
 
     async def _worker_loop(self):
         """Worker execution loop."""
-        pages_crawled, active_requests, _, request_duration = get_labeled_metrics()
-
         while self._running:
             try:
                 host, url = await asyncio.wait_for(self.work_queue.get(), timeout=0.5)
@@ -86,13 +94,13 @@ class Dispatcher:
                 continue
 
             try:
-                active_requests.inc()
+                self.metrics.active_requests.inc()
 
                 # Fetch the URL
                 status, body, duration, error = await self.fetcher(url)
 
-                request_duration.observe(duration)
-                pages_crawled.inc()
+                self.metrics.request_duration.observe(duration)
+                self.metrics.pages_crawled.inc()
 
                 # Extract links if successful
                 links = []
@@ -111,7 +119,7 @@ class Dispatcher:
                     )
                 )
             finally:
-                active_requests.dec()
+                self.metrics.active_requests.dec()
                 # Release rate limit
                 self.frontier.release(host)
 
