@@ -9,6 +9,12 @@ from __future__ import annotations
 import time
 
 import aiohttp
+import asyncio
+from urllib.parse import urlparse
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.simulation import DNSResolver
 
 
 class HttpFetcher:
@@ -45,5 +51,54 @@ class HttpFetcher:
             ) as resp:
                 body = await resp.text()
                 return resp.status, body, time.monotonic() - start, None
+        except Exception as e:
+            return 0, "", time.monotonic() - start, str(e)
+
+
+class SimulatedFetcher:
+    """模擬 fetcher，執行真實 DNS 查詢但以固定延遲模擬下載。
+
+    Usage:
+        fetcher = SimulatedFetcher(delay_ms=50, dns_resolver=resolver)
+        status, body, duration, error = await fetcher.fetch(url)
+    """
+
+    def __init__(self, delay_ms: int, dns_resolver: DNSResolver | None = None):
+        self._delay_ms = delay_ms
+        self._dns_resolver = dns_resolver
+
+    async def __aenter__(self) -> SimulatedFetcher:
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        pass
+
+    async def fetch(
+        self,
+        url: str,
+    ) -> tuple[int, str, float, str | None]:
+        """
+        模擬 HTTP 請求：
+        1. 做真實的 DNS 查詢（如果提供 resolver）
+        2. 用固定延遲模擬下載時間（不真正下載）
+
+        回傳格式與真實 fetch 相同：
+        (status, body, duration, error)
+        """
+        start = time.monotonic()
+
+        try:
+            # 1. DNS 查詢（真實，非阻塞）
+            if self._dns_resolver:
+                hostname = urlparse(url).netloc
+                await self._dns_resolver.resolve(hostname)
+
+            # 2. 模擬延遲（不真正下載）
+            delay_sec = self._delay_ms / 1000
+            await asyncio.sleep(delay_sec)
+
+            # 回傳真實總時間（DNS + 模擬延遲）
+            total_duration = time.monotonic() - start
+            return 200, "", total_duration, None
         except Exception as e:
             return 0, "", time.monotonic() - start, str(e)

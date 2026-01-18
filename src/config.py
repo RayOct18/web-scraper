@@ -60,6 +60,7 @@ class Config:
     max_per_host: int = 10
     max_pages: int = 30000
     request_timeout: float = 10.0
+    delay_per_host: float = 0.5  # seconds between requests to same host
     metrics_port: int = 9090
 
     # 模擬模式設定

@@ -7,38 +7,32 @@ Simulation Module - 模擬測試相關功能
 3. simulated_fetch - 模擬 HTTP 請求（真實 DNS + 模擬延遲）
 """
 
-import asyncio
 import json
 import random
-import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 import aiodns
 from cachetools import TTLCache
+from src.metrics import Metrics
 
 
 class DNSResolver:
     """DNS 解析器（使用 aiodns + 可選 TTLCache）"""
 
-    def __init__(self, use_cache: bool = False, cache_size: int = 1024, ttl: int = 300):
-        self.use_cache = use_cache
+    def __init__(
+        self,
+        use_cache: bool = False,
+        cache_size: int = 1024,
+        ttl: int = 300,
+        *,
+        metrics: Metrics,
+    ):
         self._resolver = aiodns.DNSResolver()
         self._cache: TTLCache[str, list[str]] | None = None
-        self.hits = 0
-        self.misses = 0
-        self._metrics = None
+        self._metrics = metrics
 
         if use_cache:
             self._cache = TTLCache(maxsize=cache_size, ttl=ttl)
-
-    def _get_metrics(self):
-        """延遲載入 metrics（避免循環 import）"""
-        if self._metrics is None:
-            from src.metrics import get_dns_metrics
-
-            self._metrics = get_dns_metrics()
-        return self._metrics
 
     async def _do_resolve(self, hostname: str) -> list[str]:
         """使用 aiodns 做真正的 DNS 查詢"""
@@ -50,35 +44,19 @@ class DNSResolver:
 
     async def resolve(self, hostname: str) -> list[str]:
         """非同步解析 hostname 為 IP 地址列表"""
-        hits_metric, misses_metric, size_metric = self._get_metrics()
-
         if self._cache is not None and hostname in self._cache:
-            self.hits += 1
-            hits_metric.inc()
+            self._metrics.dns_cache_hits.inc()
             return self._cache[hostname]
 
-        self.misses += 1
-        misses_metric.inc()
+        self._metrics.dns_cache_misses.inc()
 
         ips = await self._do_resolve(hostname)
 
         if self._cache is not None:
             self._cache[hostname] = ips
-            size_metric.set(len(self._cache))
+            self._metrics.dns_cache_size.set(len(self._cache))
 
         return ips
-
-    @property
-    def stats(self) -> dict:
-        total = self.hits + self.misses
-        cache_size = len(self._cache) if self._cache else 0
-        return {
-            "hits": self.hits,
-            "misses": self.misses,
-            "total": total,
-            "hit_rate": self.hits / total if total > 0 else 0,
-            "cache_size": cache_size,
-        }
 
 
 class URLPool:
@@ -147,49 +125,3 @@ class URLPool:
 
         selected = random.sample(paths, min(count, len(paths)))
         return [f"https://{host}{path}" for path in selected]
-
-
-async def simulated_fetch(
-    url: str,
-    delay_ms: int,
-    dns_resolver: DNSResolver | None = None,
-) -> tuple[int, str, float, str | None]:
-    """
-    模擬 HTTP 請求：
-    1. 做真實的 DNS 查詢（如果提供 resolver）
-    2. 用固定延遲模擬下載時間（不真正下載）
-
-    回傳格式與真實 fetch 相同：
-    (status, body, duration, error)
-    """
-    start = time.monotonic()
-
-    # 1. DNS 查詢（真實，非阻塞）
-    if dns_resolver:
-        hostname = urlparse(url).netloc
-        await dns_resolver.resolve(hostname)
-
-    # 2. 模擬延遲（不真正下載）
-    delay_sec = delay_ms / 1000
-    await asyncio.sleep(delay_sec)
-
-    # 回傳真實總時間（DNS + 模擬延遲）
-    total_duration = time.monotonic() - start
-    return 200, "", total_duration, None
-
-
-class SimulatedFetcher:
-    """模擬 fetcher，執行真實 DNS 查詢但以固定延遲模擬下載。
-
-    Usage:
-        fetcher = SimulatedFetcher(delay_ms=50, dns_resolver=resolver)
-        status, body, duration, error = await fetcher.fetch(url)
-    """
-
-    def __init__(self, delay_ms: int, dns_resolver: DNSResolver | None = None):
-        self._delay_ms = delay_ms
-        self._dns_resolver = dns_resolver
-
-    async def fetch(self, url: str) -> tuple[int, str, float, str | None]:
-        """模擬 fetch - 真實 DNS + 模擬延遲。"""
-        return await simulated_fetch(url, self._delay_ms, self._dns_resolver)

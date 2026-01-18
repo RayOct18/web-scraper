@@ -9,6 +9,7 @@ dependencies = [
     "cachetools>=6.2.4",
     "prometheus-client>=0.19.0",
     "pybloom-live>=4.0.0",
+    "typer>=0.21.1",
 ]
 
 [tool.uv]

@@ -8,64 +8,24 @@ URL Collector - 收集真實 URL 建立 URL 池
     uv run python -m src.url_collector --max-pages 5000
 """
 
-import argparse
 import asyncio
 import json
 from collections import defaultdict
+from typing import Annotated
 from urllib.parse import urlparse
 
+import typer
+
+from prometheus_client import CollectorRegistry
+
 from src.config import Config
-from src.dispatcher import Dispatcher, Result
 from src.fetcher import HttpFetcher
 from src.frontier import Frontier
+from src.metrics import Metrics
 from src.parser import extract_links
+from src.worker import Result, run_workers
 
-
-async def result_processor(
-    frontier: Frontier,
-    results: asyncio.Queue[Result],
-    config: Config,
-    collected_urls: dict[str, list[str]],
-) -> int:
-    """處理結果並收集 URL"""
-    crawled = 0
-    empty_count = 0
-
-    while crawled < config.max_pages:
-        try:
-            result = await asyncio.wait_for(results.get(), timeout=0.5)
-            empty_count = 0
-        except asyncio.TimeoutError:
-            empty_count += 1
-            if empty_count > 10:
-                print(f"No more URLs, stopped at {crawled} pages")
-                break
-            continue
-
-        crawled += 1
-
-        if result.error:
-            print(f"[{crawled}] ERROR {result.url}: {result.error}")
-        else:
-            links_count = len(result.links)
-            print(f"[{crawled}] {result.status} {result.url} ({result.duration:.2f}s, {links_count} links)")
-
-        # 收集所有發現的連結（按 host 分類）
-        for link in result.links:
-            parsed = urlparse(link)
-            host = parsed.netloc
-            path = parsed.path or "/"
-            if parsed.query:
-                path += f"?{parsed.query}"
-
-            # 只保留路徑（不重複完整 URL）
-            if path not in collected_urls[host]:
-                collected_urls[host].append(path)
-
-            # 同時加入 frontier 繼續爬取
-            await frontier.add(link)
-
-    return crawled
+app = typer.Typer(help="Collect URLs for simulation testing")
 
 
 def save_url_pool(collected_urls: dict[str, list[str]], output_file: str):
@@ -84,58 +44,101 @@ def save_url_pool(collected_urls: dict[str, list[str]], output_file: str):
     print(f"\nSaved {total} URLs from {len(collected_urls)} hosts to {output_file}")
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Collect URLs for simulation testing")
-    parser.add_argument(
-        "--max-pages", type=int, default=5000, help="Maximum pages to crawl"
+@app.command()
+def main(
+    max_pages: Annotated[int, typer.Option(help="Maximum pages to crawl")] = 5000,
+    output: Annotated[str, typer.Option(help="Output file path")] = "url_pool.json",
+    workers: Annotated[int, typer.Option(help="Number of workers")] = 10,
+    max_per_host: Annotated[
+        int, typer.Option(help="Max concurrent requests per host")
+    ] = 10,
+):
+    config = Config(
+        max_pages=max_pages,
+        num_workers=workers,
+        max_per_host=max_per_host,
     )
-    parser.add_argument(
-        "--output", type=str, default="url_pool.json", help="Output file path"
-    )
-    parser.add_argument("--workers", type=int, default=10, help="Number of workers")
-    parser.add_argument(
-        "--max-per-host", type=int, default=10, help="Max concurrent requests per host"
-    )
-    args = parser.parse_args()
-
-    config = Config()
-    config.max_pages = args.max_pages
-    config.num_workers = args.workers
-    config.max_per_host = args.max_per_host
 
     print("=== URL Collector ===")
     print(f"Seeds: {len(config.seed_urls)} domains")
     print(f"Workers: {config.num_workers}, MaxPerHost: {config.max_per_host}")
     print(f"MaxPages: {config.max_pages}")
-    print(f"Output: {args.output}")
+    print(f"Output: {output}")
     print("=====================\n")
 
-    frontier = Frontier(config.max_per_host)
-    results: asyncio.Queue[Result] = asyncio.Queue(maxsize=1000)
+    asyncio.run(_main(config, output))
+
+
+async def _main(config: Config, output: str):
     collected_urls: dict[str, list[str]] = defaultdict(list)
+    # Use empty registry - metrics work but aren't collected/scraped
+    metrics = Metrics(
+        mode="collector",
+        dns_cache=False,
+        workers=config.num_workers,
+        registry=CollectorRegistry(),
+    )
+    frontier = Frontier(
+        max_per_host=config.max_per_host, delay_per_host=0, metrics=metrics
+    )
 
     for url in config.seed_urls:
-        await frontier.add(url)
+        await frontier.add_url(url)
+
+    # 進度追蹤
+    crawled = 0
+    done_event = asyncio.Event()
+
+    async def on_result(result: Result) -> None:
+        nonlocal crawled
+        crawled += 1
+
+        if result.error:
+            print(f"[{crawled}] ERROR {result.url}: {result.error}")
+        else:
+            links_count = len(result.links)
+            print(
+                f"[{crawled}] {result.status} {result.url} ({result.duration:.2f}s, {links_count} links)"
+            )
+
+        # 收集所有發現的連結（按 host 分類）
+        for link in result.links:
+            parsed = urlparse(link)
+            host = parsed.netloc
+            path = parsed.path or "/"
+            if parsed.query:
+                path += f"?{parsed.query}"
+
+            # 只保留路徑（不重複完整 URL）
+            if path not in collected_urls[host]:
+                collected_urls[host].append(path)
+
+        if crawled >= config.max_pages:
+            done_event.set()
 
     async with HttpFetcher(timeout=config.request_timeout) as http_fetcher:
-        def link_extractor(body: str, url: str) -> list[str]:
-            return extract_links(body, url)
+        link_extractor = lambda body, url: extract_links(body, url)
 
-        # 使用 Dispatcher
-        dispatcher = Dispatcher(
+        worker_tasks = await run_workers(
             frontier=frontier,
             fetcher=http_fetcher.fetch,
             link_extractor=link_extractor,
-            results=results,
+            on_result=on_result,
+            metrics=metrics,
             num_workers=config.num_workers,
         )
 
-        async with dispatcher:
-            crawled = await result_processor(frontier, results, config, collected_urls)
+        # Wait until done
+        await done_event.wait()
+
+        # Cancel workers
+        for task in worker_tasks:
+            task.cancel()
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
 
     print(f"\nCrawled: {crawled} pages")
-    save_url_pool(collected_urls, args.output)
+    save_url_pool(collected_urls, output)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app()
