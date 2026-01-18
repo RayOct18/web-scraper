@@ -81,6 +81,9 @@ async def _main(config: Config):
         max_per_host=config.max_per_host,
         delay_per_host=config.delay_per_host,
         metrics=metrics,
+        use_bloom_filter=config.use_bloom_filter,
+        bloom_capacity=config.bloom_capacity,
+        bloom_error_rate=config.bloom_error_rate,
     )
 
     for url in config.seed_urls:

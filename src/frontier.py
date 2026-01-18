@@ -6,6 +6,8 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from pybloom_live import BloomFilter
+
 if TYPE_CHECKING:
     from src.metrics import Metrics
 
@@ -19,13 +21,21 @@ class Frontier:
         delay_per_host: float = 1.0,
         *,
         metrics: Metrics,
+        use_bloom_filter: bool = False,
+        bloom_capacity: int = 100_000,
+        bloom_error_rate: float = 0.01,
     ):
         self.max_per_host = max_per_host
         self.delay_per_host = delay_per_host
         self._metrics = metrics
 
         # URL deduplication
-        self.seen: set[str] = set()
+        if use_bloom_filter:
+            self.seen: set[str] | BloomFilter = BloomFilter(
+                capacity=bloom_capacity, error_rate=bloom_error_rate
+            )
+        else:
+            self.seen = set()
 
         # Per-host queues and rate limiting
         self.host_queues: dict[str, asyncio.Queue[str]] = defaultdict(asyncio.Queue)

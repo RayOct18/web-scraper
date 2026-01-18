@@ -72,4 +72,6 @@ class Config:
 
     # 優化選項
     use_bloom_filter: bool = False
+    bloom_capacity: int = 100_000
+    bloom_error_rate: float = 0.01
     use_dns_cache: bool = False
