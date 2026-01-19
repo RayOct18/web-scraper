@@ -1,6 +1,6 @@
 # Python Web Crawler
 
-高效能網路爬蟲實作，使用 Python asyncio + aiohttp。
+高效能網路爬蟲實作，使用 Python asyncio + aiohttp。[筆記連結](https://hackmd.io/@-4tblbsWSwu3rYgE5d0CCw/B1XX0Pir-l)
 
 ## 架構
 
@@ -121,31 +121,4 @@ docker compose up -d
 - **Prometheus**: http://localhost:9091
 - **Metrics endpoint**: `:9090/metrics`
 - 指標：pages_crawled, active_requests, request_duration, queue_size
-
-## Benchmark 結果
-
-### Bloom Filter vs Set
-
-| 規模 | Set 記憶體 | Bloom 記憶體 | 節省 |
-|------|-----------|-------------|------|
-| 10K URLs | 1.2 MB | 11.8 KB | 101x |
-| 100K URLs | 10.8 MB | 117 KB | 94x |
-| 1M URLs | 100.6 MB | 1.1 MB | 88x |
-
-### DNS Cache
-
-| 方法 | 每次查詢 | 加速比 |
-|------|---------|--------|
-| 無 Cache | 20.6 ms | 1x |
-| @lru_cache | 1.7 ms | 12x |
-
-## QPS 與頻寬關係
-
-| 頻寬 | 平均頁面 50KB | 平均頁面 100KB |
-|------|--------------|----------------|
-| 100 Mbps | 250 QPS | 125 QPS |
-| 200 Mbps | 500 QPS | 250 QPS |
-| 1 Gbps | 2500 QPS | 1250 QPS |
-
-要達到 400 QPS（50KB 頁面），需要約 **160 Mbps** 頻寬。
 
